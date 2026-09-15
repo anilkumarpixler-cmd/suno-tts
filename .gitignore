@@ -1,0 +1,28 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+*.env
+.pytest_cache/
+.vscode/
+.idea/
+*.log
+
+# AI model files
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Generated audio
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+
+# Temporary files
+tmp/
+temp/
+uploads/
+outputs/

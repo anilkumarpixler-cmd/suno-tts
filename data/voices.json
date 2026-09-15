@@ -1,0 +1,24 @@
+[
+  {
+    "id": "v_ddaa214411",
+    "name": "Sister",
+    "languages": [
+      "Hindi"
+    ],
+    "status": "Ready",
+    "is_default": false,
+    "avatar": "\ud83d\udc64",
+    "file_path": "C:\\Suno_Project\\suno-tts\\data\\recordings\\v_ddaa214411.m4a"
+  },
+  {
+    "id": "v_9710ab13b2",
+    "name": "Brother",
+    "languages": [
+      "Hindi"
+    ],
+    "status": "Ready",
+    "is_default": true,
+    "avatar": "\ud83d\udc64",
+    "file_path": "C:\\Suno_Project\\suno-tts\\data\\recordings\\v_9710ab13b2.m4a"
+  }
+]
