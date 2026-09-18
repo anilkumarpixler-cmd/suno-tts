@@ -94,7 +94,7 @@ def create_voice_json(body: VoiceJson, request: Request):
         raise HTTPException(400, "Name is required")
     payload = body.audio_base64.strip()
     if payload.startswith("data:"):
-        print(payload,"😎😎")
+        print(payload,"😎😎💖💖")
         payload = payload.split(",", 1)[-1]
     try:
         data = base64.b64decode(payload)

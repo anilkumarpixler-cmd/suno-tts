@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.tts import router as tts_router
 from app.api.voices import router as voices_router
+from app.services.chatterbox_client import colab_configured, ping_colab
 from app.store import ensure_dirs
 
 ensure_dirs()
@@ -19,5 +20,18 @@ app.include_router(tts_router, prefix="/v1")
 
 
 @app.get("/health")
-def health():
-    return {"ok": True}
+async def health():
+    configured = colab_configured()
+    ping = (
+        await ping_colab()
+        if configured
+        else {"reachable": False, "cuda": False, "loaded": False}
+    )
+    return {
+        "ok": True,
+        "colab": configured,
+        "colabConfigured": configured,
+        "colabReachable": bool(ping.get("reachable")),
+        "colabCuda": bool(ping.get("cuda")),
+        "colabLoaded": bool(ping.get("loaded")),
+    }
