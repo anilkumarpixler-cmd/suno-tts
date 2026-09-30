@@ -9,12 +9,16 @@ from io import BytesIO
 from pathlib import Path
 from threading import Lock
 
+# import numpy as np
+# import noisereduce as nr
+
 import torch
 import torchaudio
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import Response
 
 SECRET = os.environ.get("COLAB_TTS_SECRET", "").strip()
+ 
 MODEL = None
 MODEL_LOCK = Lock()
 
@@ -29,8 +33,8 @@ def load_model():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading ChatterboxMultilingualTTS on {device}")
-    MODEL = ChatterboxMultilingualTTS.from_pretrained(device=device)
-    #MODEL = ChatterboxMultilingualTTS.from_pretrained(device=device, t3_model="v3")
+    # MODEL = ChatterboxMultilingualTTS.from_pretrained(device=device)
+    MODEL = ChatterboxMultilingualTTS.from_pretrained(device=device, t3_model="v3")
     return MODEL
 
 
@@ -45,6 +49,36 @@ def _language_id(value: str | None) -> str:
         return "hi"
     return "en"
 
+# def clean_audio(wav: torch.Tensor, sample_rate: int) -> torch.Tensor:
+#     """
+#     Light noise reduction for Chatterbox output.
+#     Keeps the processing moderate so the voice does not become metallic.
+#     """
+
+#     # [channels, samples] -> mono numpy
+#     audio = wav.detach().cpu()
+
+#     if audio.dim() == 2:
+#         audio_np = audio.mean(dim=0).numpy()
+#     else:
+#         audio_np = audio.numpy()
+
+#     # Light noise reduction
+#     cleaned = nr.reduce_noise(
+#         y=audio_np,
+#         sr=sample_rate,
+#         stationary=False,
+#         prop_decrease=1.5,
+#     )
+
+#     # Prevent clipping
+#     peak = np.max(np.abs(cleaned))
+
+#     if peak > 0.98:
+#         cleaned = cleaned / peak * 0.98
+
+#     return torch.from_numpy(cleaned).unsqueeze(0).float()
+    
 
 @app.get("/health")
 def health():
@@ -73,13 +107,16 @@ async def generate(
     model = load_model()
     lang = _language_id(language_id)
 
+
     try:
+
         with MODEL_LOCK:
-            wav = model.generate(story, language_id=lang, audio_prompt_path=str(prompt))
-        buffer = BytesIO()
-        torchaudio.save(buffer, wav.cpu(), model.sr, format="wav")
-        return Response(content=buffer.getvalue(), media_type="audio/wav")
-    except Exception as error:
-        raise HTTPException(500, f"Chatterbox failed: {error}") from error
+            wav, sample_rate = model.synthesize(story, lang, str(prompt))
+            # wav = clean_audio(wav, sample_rate)
+            buffer = BytesIO()
+            torchaudio.save(buffer, wav, sample_rate, format="wav")
+            buffer.seek(0)
+            return Response(content=buffer.read(), media_type="audio/wav")
+
     finally:
         prompt.unlink(missing_ok=True)

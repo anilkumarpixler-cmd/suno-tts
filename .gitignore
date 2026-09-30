@@ -26,3 +26,5 @@ tmp/
 temp/
 uploads/
 outputs/
+
+voices.json

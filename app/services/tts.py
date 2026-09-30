@@ -1,22 +1,28 @@
 import hashlib
-import re
+# import re
 from pathlib import Path
+
+from app.services.story_chunker import chunk_story
 
 import edge_tts
 
 from app.services.audio import (
+    AUDIO_PIPELINE_VERSION,
+    CHUNK_PAUSE_MS,
     audio_duration,
+    clean_chunk_wav,
     concat_wav_bytes,
     delete_file,
     ensure_wav,
     find_cloned_tts_path,
     find_tts_path,
+    prepare_prompt_wav,
     tts_path,
 )
 from app.services.chatterbox_client import colab_configured, generate_on_colab
 from app.store import load_voices
 
-CHUNK_CHARS = 320
+# CHUNK_CHARS = 150
 
 VOICE_BY_LANGUAGE = {
     "hi": "hi-IN-SwaraNeural",
@@ -45,38 +51,62 @@ def language_id(language: str | None) -> str:
 
 
 def cache_id(text: str, language: str, voice_id: str | None = None) -> str:
-    key = f"{voice_id or ''}|{normalize_language(language)}|{text.strip()}"
+    key = f"{voice_id or ''}|{normalize_language(language)}|{text.strip()}|{AUDIO_PIPELINE_VERSION}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
 
 
 def split_sentences(text: str) -> list[str]:
-    cleaned = text.strip()
-    if not cleaned:
-        return []
-    parts = re.split(r"(?<=[.?!।])\s+", cleaned)
-    chunks: list[str] = []
-    buf = ""
-    for part in parts:
-        piece = part.strip()
-        if not piece:
-            continue
-        candidate = f"{buf} {piece}".strip() if buf else piece
-        if len(candidate) <= CHUNK_CHARS:
-            buf = candidate
-            continue
-        if buf:
-            chunks.append(buf)
-        if len(piece) <= CHUNK_CHARS:
-            buf = piece
-            continue
-        for start in range(0, len(piece), CHUNK_CHARS):
-            slice_text = piece[start : start + CHUNK_CHARS].strip()
-            if slice_text:
-                chunks.append(slice_text)
-        buf = ""
-    if buf:
-        chunks.append(buf)
-    return chunks or [cleaned]
+    return chunk_story(text)
+    # cleaned = text.strip()
+    # if not cleaned:
+    #     return []
+    
+    # # 1. Split by sentence ends (. ? ! ।)
+    # parts = re.split(r"(?<=[.?!।])\s+", cleaned)
+    # chunks: list[str] = []
+    # buf = ""
+    
+    # for part in parts:
+    #     piece = part.strip()
+    #     if not piece:
+    #         continue
+            
+    #     candidate = f"{buf} {piece}".strip() if buf else piece
+        
+    #     # Fits comfortably in buffer
+    #     if len(candidate) <= CHUNK_CHARS:
+    #         buf = candidate
+    #         continue
+            
+    #     # Flush current buffer if candidate is too big
+    #     if buf:
+    #         chunks.append(buf)
+    #         buf = ""
+            
+    #     # If single piece fits CHUNK_CHARS
+    #     if len(piece) <= CHUNK_CHARS:
+    #         buf = piece
+    #         continue
+            
+    #     # 2. FIX: Piece is too long! Split safely by sub-clause (commas/spaces)
+    #     sub_parts = re.split(r"(?<=[,;:\-])\s+|\s+", piece)
+    #     sub_buf = ""
+    #     for sub in sub_parts:
+    #         sub_candidate = f"{sub_buf} {sub}".strip() if sub_buf else sub
+    #         if len(sub_candidate) <= CHUNK_CHARS:
+    #             sub_buf = sub_candidate
+    #         else:
+    #             if sub_buf:
+    #                 chunks.append(sub_buf)
+    #             sub_buf = sub
+    #     if sub_buf:
+    #         buf = sub_buf
+
+    # if buf:
+    #     chunks.append(buf)
+        
+    # return chunks or [cleaned]
+    
 
 
 def _readable(path_value: str | None) -> Path | None:
@@ -104,6 +134,8 @@ def resolve_prompt(voice_id: str | None) -> tuple[str, Path] | None:
             continue
         prompt = ensure_wav(source)
         if prompt.exists() and prompt.stat().st_size > 0:
+            if prompt.suffix.lower() == ".wav":
+                prompt = prepare_prompt_wav(prompt)
             return str(item.get("id") or ""), prompt
     return None
 
@@ -128,11 +160,11 @@ async def _clone_on_colab(text: str, language: str, prompt_wav: Path, dest: Path
     lang = language_id(language)
     chunks = split_sentences(text)
     wavs: list[bytes] = []
-    for chunk in chunks:
+    for index, chunk in enumerate(chunks):
         audio = await generate_on_colab(chunk, lang, str(prompt_wav))
         if not audio:
             raise RuntimeError("Colab produced empty audio")
-        wavs.append(audio)
+        wavs.append(clean_chunk_wav(audio, CHUNK_PAUSE_MS if index < len(chunks) - 1 else 0))
     if len(wavs) == 1:
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(".tmp.wav")

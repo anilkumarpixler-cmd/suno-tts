@@ -146,6 +146,9 @@ def delete_voice(voice_id: str):
     if not voice:
         raise HTTPException(404, "Voice not found")
     delete_file(voice.get("file_path"))
+    if voice.get("file_path"):
+        path = Path(voice["file_path"])
+        delete_file(str(path.with_name(f"{path.stem}.prompt.wav")))
     remaining = [item for item in voices if item["id"] != voice_id]
     if voice.get("is_default") and remaining:
         remaining[0]["is_default"] = True
