@@ -27,4 +27,6 @@ temp/
 uploads/
 outputs/
 
-voices.json
+data/voices.json
+data/tts/
+data/recordings/
