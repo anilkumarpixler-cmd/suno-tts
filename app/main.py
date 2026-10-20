@@ -1,9 +1,13 @@
+import asyncio
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.tts import router as tts_router
 from app.api.voices import router as voices_router
-from app.services.chatterbox_client import colab_configured, ping_colab
+from app.services.chatterbox_client import colab_configured
+from app.services.gpu_status import gpu_status, watch_gpu
+from app.services.voice_prep import resume_pending
 from app.store import ensure_dirs
 
 ensure_dirs()
@@ -19,19 +23,34 @@ app.include_router(voices_router, prefix="/v1")
 app.include_router(tts_router, prefix="/v1")
 
 
+@app.on_event("startup")
+async def resume_voice_prep():
+    # Voices still "Preparing" were interrupted by a restart; finish them in the background.
+    asyncio.create_task(resume_pending())
+    # Keeps the GPU state fresh in the background, so /health never waits for Kaggle.
+    if colab_configured():
+        _background_tasks.append(asyncio.create_task(watch_gpu()))
+
+
+# Strong references, so background loops are not garbage-collected.
+_background_tasks: list[asyncio.Task[None]] = []
+
+
+@app.get("/ping")
+def ping():
+    # Backend check only: answers at once and never touches Kaggle.
+    return {"ok": True}
+
+
 @app.get("/health")
-async def health():
+def health():
     configured = colab_configured()
-    ping = (
-        await ping_colab()
-        if configured
-        else {"reachable": False, "cuda": False, "loaded": False}
-    )
+    gpu = gpu_status() if configured else {"reachable": False, "cuda": False, "loaded": False}
     return {
         "ok": True,
         "colab": configured,
         "colabConfigured": configured,
-        "colabReachable": bool(ping.get("reachable")),
-        "colabCuda": bool(ping.get("cuda")),
-        "colabLoaded": bool(ping.get("loaded")),
+        "colabReachable": bool(gpu.get("reachable")),
+        "colabCuda": bool(gpu.get("cuda")),
+        "colabLoaded": bool(gpu.get("loaded")),
     }

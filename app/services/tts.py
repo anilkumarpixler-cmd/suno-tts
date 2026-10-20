@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 # import re
 from pathlib import Path
@@ -129,6 +130,10 @@ def resolve_prompt(voice_id: str | None) -> tuple[str, Path] | None:
     ordered.extend(item for item in voices if item not in ordered)
 
     for item in ordered:
+        # Prepared at save time by voice_prep: no ffmpeg work at play time.
+        prepared = _readable(item.get("prompt_path"))
+        if prepared is not None:
+            return str(item.get("id") or ""), prepared
         source = _readable(item.get("file_path"))
         if source is None:
             continue
@@ -164,14 +169,16 @@ async def _clone_on_colab(text: str, language: str, prompt_wav: Path, dest: Path
         audio = await generate_on_colab(chunk, lang, str(prompt_wav))
         if not audio:
             raise RuntimeError("Colab produced empty audio")
-        wavs.append(clean_chunk_wav(audio, CHUNK_PAUSE_MS if index < len(chunks) - 1 else 0))
+        wavs.append(
+            await asyncio.to_thread(clean_chunk_wav, audio, CHUNK_PAUSE_MS if index < len(chunks) - 1 else 0)
+        )
     if len(wavs) == 1:
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(".tmp.wav")
         tmp.write_bytes(wavs[0])
         tmp.replace(dest)
         return dest
-    return concat_wav_bytes(wavs, dest)
+    return await asyncio.to_thread(concat_wav_bytes, wavs, dest)
 
 
 async def synthesize(
@@ -179,7 +186,7 @@ async def synthesize(
     language: str,
     voice_id: str | None = None,
 ) -> tuple[str, Path, float, bool]:
-    prompt = resolve_prompt(voice_id)
+    prompt = await asyncio.to_thread(resolve_prompt, voice_id)
     prompt_id = prompt[0] if prompt else (voice_id or "")
     tts_id = cache_id(text, language, prompt_id)
     want_clone = colab_configured() and bool(prompt)

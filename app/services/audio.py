@@ -15,7 +15,7 @@ from app.store import RECORDINGS_DIR, TTS_DIR, ensure_dirs
 WAV_EXTENSIONS = {".wav"}
 
 # Bump when prompt/chunk processing changes so cached story audio is regenerated.
-AUDIO_PIPELINE_VERSION = "2"
+AUDIO_PIPELINE_VERSION = "4"
 
 # Chatterbox clones the prompt's room noise along with the voice. Removing rumble, the
 # ~100 Hz mains hum and steady hiss (and trimming the ends) cut the noisy lead-in at the
@@ -29,14 +29,14 @@ PROMPT_FILTER = (
 )
 
 # Silence appended to every chunk except the last, so a chunk change sounds like a full stop.
-CHUNK_PAUSE_MS = 0
-_FRAME_MS = 10
-_SPEECH_DROP = 10 ** (17 / 20)  # cut level = 90th-percentile frame RMS - 17 dB (tuned on real chunks)
+CHUNK_PAUSE_MS = 150
+_FRAME_MS = 20
+_SPEECH_DROP = 10 ** (22 / 20)  # cut level = 90th-percentile frame RMS - 17 dB (tuned on real chunks)
 _ONSET_FRAMES = 6  # speech must hold for most of 60 ms, so a single noise blip is skipped
 _PRE_ROLL_MS = 2
-_POST_ROLL_MS = 80
+_POST_ROLL_MS = 150
 _FADE_IN_MS = 20  # spans the pre-roll, so what is left of the lead-in ramps up from silence
-_FADE_OUT_MS =50
+_FADE_OUT_MS =20
 _MIN_CLEAN_S = 0.3
 
 

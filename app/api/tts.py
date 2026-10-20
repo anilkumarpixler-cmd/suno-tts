@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -6,7 +7,11 @@ from pydantic import BaseModel
 
 from app.services.audio import find_tts_path, media_type_for
 from app.services.story_stream import (
+    cancel_story_play,
     cancel_story_stream,
+    pause_story_stream,
+    prefetch_story_start,
+    resume_story_stream,
     start_story_stream,
     story_stream_chunk_exists,
     story_stream_chunk_path,
@@ -27,6 +32,8 @@ class TtsRequest(BaseModel):
 
 class StoryStreamRequest(TtsRequest):
     voice_version: str | None = None
+    # One tap on a story in the app; DELETE /stream/play/{play_id} stops listening to it.
+    play_id: str | None = None
 
 
 @router.post("")
@@ -74,7 +81,8 @@ async def create_story_stream(body: StoryStreamRequest, request: Request):
     if not text:
         raise HTTPException(400, "Text is required")
 
-    prompt = resolve_prompt(body.voice_id)
+    # In a thread: it may run ffmpeg on a recording that was never prepared.
+    prompt = await asyncio.to_thread(resolve_prompt, body.voice_id)
     if prompt is None:
         raise HTTPException(503, "No prompt/voice recording available for streaming TTS")
 
@@ -84,11 +92,20 @@ async def create_story_stream(body: StoryStreamRequest, request: Request):
         voice_id=body.voice_id,
         voice_version=body.voice_version,
         prompt_wav_path=prompt[1],
+        play_id=body.play_id,
     )
 
     base = str(request.base_url).rstrip("/")
     story_key = output.get("key")
     final_audio_url = f"{base}/v1/tts/stream/{story_key}/final"
+    if output.get("cancelled"):
+        return {
+            "streaming": False,
+            "cached": False,
+            "cancelled": True,
+            "story_key": story_key,
+        }
+
     if output.get("cached"):
         return {
             "streaming": True,
@@ -116,10 +133,50 @@ async def create_story_stream(body: StoryStreamRequest, request: Request):
     }
 
 
+@router.post("/stream/prefetch")
+async def prefetch_story_stream(body: StoryStreamRequest):
+    # The app calls this for the next story while the current one plays: only its first chunks are
+    # queued, and a free GPU makes them between the current story's chunks.
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(400, "Text is required")
+
+    prompt = await asyncio.to_thread(resolve_prompt, body.voice_id)
+    if prompt is None:
+        raise HTTPException(503, "No prompt/voice recording available for streaming TTS")
+
+    story_key = prefetch_story_start(
+        story_text=text,
+        language=body.language,
+        voice_id=body.voice_id,
+        voice_version=body.voice_version,
+        prompt_wav_path=prompt[1],
+    )
+    return {"story_key": story_key}
+
+
 @router.delete("/stream/{story_key}")
 def delete_story_stream(story_key: str):
     # The app calls this when the listener leaves a story that is still generating.
     return {"cancelled": cancel_story_stream(story_key)}
+
+
+@router.delete("/stream/play/{play_id}")
+def delete_story_play(play_id: str):
+    # The app calls this when the listener leaves a play, even one still waiting for its first
+    # part. The story keeps generating while another play (or device) still listens to it.
+    return {"cancelled": cancel_story_play(play_id)}
+
+
+@router.post("/stream/{story_key}/pause")
+def pause_story_stream_route(story_key: str, chunk: int = 0):
+    # The listener paused on `chunk`: only a few chunks past it keep generating.
+    return {"paused": pause_story_stream(story_key, chunk)}
+
+
+@router.post("/stream/{story_key}/resume")
+def resume_story_stream_route(story_key: str):
+    return {"resumed": resume_story_stream(story_key)}
 
 
 STREAM_WAIT_MAX_S = 25.0

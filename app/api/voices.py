@@ -4,11 +4,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.services.audio import delete_file, save_bytes, save_recording
+from app.services.voice_prep import prepare_voice
 from app.store import load_voices, save_voices
 
 router = APIRouter(prefix="/voices", tags=["voices"])
@@ -53,19 +54,27 @@ def _with_urls(request: Request, voice: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _persist(request: Request, name: str, languages: list[str], path: Path) -> dict[str, Any]:
+def _persist(
+    request: Request,
+    background: BackgroundTasks,
+    name: str,
+    languages: list[str],
+    path: Path,
+) -> dict[str, Any]:
     voices = load_voices()
     voice = {
         "id": path.stem,
         "name": name.strip(),
         "languages": languages,
-        "status": "Ready",
+        "status": "Preparing",
         "is_default": len(voices) == 0,
         "avatar": "👤",
         "file_path": str(path),
     }
     voices.append(voice)
     save_voices(voices)
+    # Clean the prompt and prepare it on the GPU now, so the first story skips that work.
+    background.add_task(prepare_voice, voice["id"])
     return _with_urls(request, voice)
 
 
@@ -77,6 +86,7 @@ def list_voices(request: Request):
 @router.post("")
 async def create_voice(
     request: Request,
+    background: BackgroundTasks,
     name: str = Form(...),
     languages: str = Form("English"),
     audio: UploadFile = File(...),
@@ -85,16 +95,15 @@ async def create_voice(
         raise HTTPException(400, "Name is required")
     voice_id = f"v_{uuid.uuid4().hex[:10]}"
     path = await save_recording(voice_id, audio)
-    return _persist(request, name, _parse_languages(languages), path)
+    return _persist(request, background, name, _parse_languages(languages), path)
 
 
 @router.post("/json")
-def create_voice_json(body: VoiceJson, request: Request):
+def create_voice_json(body: VoiceJson, request: Request, background: BackgroundTasks):
     if not body.name.strip():
         raise HTTPException(400, "Name is required")
     payload = body.audio_base64.strip()
     if payload.startswith("data:"):
-        print(payload,"😎😎💖💖")
         payload = payload.split(",", 1)[-1]
     try:
         data = base64.b64decode(payload)
@@ -104,7 +113,7 @@ def create_voice_json(body: VoiceJson, request: Request):
         raise HTTPException(400, "Audio file is required")
     voice_id = f"v_{uuid.uuid4().hex[:10]}"
     path = save_bytes(voice_id, data, body.filename)
-    return _persist(request, body.name, _parse_languages(body.languages), path)
+    return _persist(request, background, body.name, _parse_languages(body.languages), path)
 
 
 @router.get("/{voice_id}/audio")
@@ -149,6 +158,8 @@ def delete_voice(voice_id: str):
     if voice.get("file_path"):
         path = Path(voice["file_path"])
         delete_file(str(path.with_name(f"{path.stem}.prompt.wav")))
+        if path.suffix.lower() != ".wav":
+            delete_file(str(path.with_suffix(".wav")))  # ffmpeg conversion made by ensure_wav
     remaining = [item for item in voices if item["id"] != voice_id]
     if voice.get("is_default") and remaining:
         remaining[0]["is_default"] = True

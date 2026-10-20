@@ -1,7 +1,10 @@
 import re
 
-MIN_WORDS = 15
+MIN_WORDS = 25
 MAX_WORDS = 50
+# The first chunk is kept short so the first audio is ready sooner; later chunks are
+# generated while earlier ones play.
+FIRST_MAX_WORDS = 20
 
 
 def _word_count(text: str) -> int:
@@ -36,7 +39,8 @@ def chunk_story(text: str) -> list[str]:
 
         candidate_words = current_words + sentence_words
 
-        if candidate_words <= MAX_WORDS:
+        max_words = FIRST_MAX_WORDS if not chunks else MAX_WORDS
+        if candidate_words <= max_words:
             current.append(sentence)
             current_words = candidate_words
             continue
