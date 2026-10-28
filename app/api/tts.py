@@ -1,7 +1,6 @@
-import asyncio
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -36,8 +35,12 @@ class StoryStreamRequest(TtsRequest):
     play_id: str | None = None
 
 
+# Optional: when voice_id is missing or deleted, the device's default voice narrates.
+DeviceId = Header(default=None, alias="X-Device-Id")
+
+
 @router.post("")
-async def create_tts(body: TtsRequest, request: Request):
+async def create_tts(body: TtsRequest, request: Request, device_id: str | None = DeviceId):
     text = body.text.strip()
     if not text:
         raise HTTPException(400, "Text is required")
@@ -62,7 +65,7 @@ async def create_tts(body: TtsRequest, request: Request):
         pass
     # #endregion
     try:
-        tts_id, path, duration, cloned = await synthesize(text, body.language, body.voice_id)
+        tts_id, path, duration, cloned = await synthesize(text, body.language, body.voice_id, device_id)
     except TtsUnavailable as error:
         raise HTTPException(503, str(error)) from error
     base = str(request.base_url).rstrip("/")
@@ -76,20 +79,19 @@ async def create_tts(body: TtsRequest, request: Request):
 
 
 @router.post("/stream")
-async def create_story_stream(body: StoryStreamRequest, request: Request):
+async def create_story_stream(body: StoryStreamRequest, request: Request, device_id: str | None = DeviceId):
     text = body.text.strip()
     if not text:
         raise HTTPException(400, "Text is required")
 
-    # In a thread: it may run ffmpeg on a recording that was never prepared.
-    prompt = await asyncio.to_thread(resolve_prompt, body.voice_id)
+    prompt = await resolve_prompt(body.voice_id, device_id)
     if prompt is None:
         raise HTTPException(503, "No prompt/voice recording available for streaming TTS")
 
     output = await start_story_stream(
         story_text=text,
         language=body.language,
-        voice_id=body.voice_id,
+        voice_id=prompt[0],
         voice_version=body.voice_version,
         prompt_wav_path=prompt[1],
         play_id=body.play_id,
@@ -134,21 +136,21 @@ async def create_story_stream(body: StoryStreamRequest, request: Request):
 
 
 @router.post("/stream/prefetch")
-async def prefetch_story_stream(body: StoryStreamRequest):
+async def prefetch_story_stream(body: StoryStreamRequest, device_id: str | None = DeviceId):
     # The app calls this for the next story while the current one plays: only its first chunks are
     # queued, and a free GPU makes them between the current story's chunks.
     text = body.text.strip()
     if not text:
         raise HTTPException(400, "Text is required")
 
-    prompt = await asyncio.to_thread(resolve_prompt, body.voice_id)
+    prompt = await resolve_prompt(body.voice_id, device_id)
     if prompt is None:
         raise HTTPException(503, "No prompt/voice recording available for streaming TTS")
 
     story_key = prefetch_story_start(
         story_text=text,
         language=body.language,
-        voice_id=body.voice_id,
+        voice_id=prompt[0],
         voice_version=body.voice_version,
         prompt_wav_path=prompt[1],
     )

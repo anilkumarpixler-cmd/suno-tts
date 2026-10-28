@@ -30,3 +30,8 @@ outputs/
 data/voices.json
 data/tts/
 data/recordings/
+.ipynb
+*.ipynb
+# Claude Code rules and skills
+CLAUDE.md
+.claude/

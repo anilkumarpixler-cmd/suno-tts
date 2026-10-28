@@ -20,8 +20,12 @@ from app.services.audio import (
     prepare_prompt_wav,
     tts_path,
 )
+from sqlalchemy import select
+
+from app.database.db import sessionLocal
+from app.models.voice import Voice
 from app.services.chatterbox_client import colab_configured, generate_on_colab
-from app.store import load_voices
+from app.services.voice_store import abs_path
 
 # CHUNK_CHARS = 150
 
@@ -119,16 +123,40 @@ def _readable(path_value: str | None) -> Path | None:
     return None
 
 
-def resolve_prompt(voice_id: str | None) -> tuple[str, Path] | None:
-    voices = load_voices()
-    ordered: list[dict] = []
-    if voice_id:
-        match = next((item for item in voices if item.get("id") == voice_id), None)
-        if match:
-            ordered.append(match)
-    ordered.extend(item for item in voices if item.get("is_default") and item not in ordered)
-    ordered.extend(item for item in voices if item not in ordered)
+async def _candidate_voices(voice_id: str | None, device_id: str | None) -> list[dict]:
+    # The asked voice first, then the same device's default, then its other voices.
+    try:
+        async with sessionLocal() as db:
+            match = await db.get(Voice, voice_id) if voice_id else None
+            owner = match.device_id if match else device_id
+            others: list[Voice] = []
+            if owner:
+                result = await db.execute(
+                    select(Voice)
+                    .where(Voice.device_id == owner)
+                    .order_by(Voice.is_default.desc(), Voice.created_at)
+                )
+                others = [item for item in result.scalars().all() if item is not match]
+    except Exception as error:
+        print(f"[tts] voice lookup failed: {error}", flush=True)
+        return []
+    return [
+        {
+            "id": item.id,
+            "prompt_path": str(abs_path(item.prompt_path) or ""),
+            "file_path": str(abs_path(item.file_path) or ""),
+        }
+        for item in ([match] if match else []) + others
+    ]
 
+
+async def resolve_prompt(voice_id: str | None, device_id: str | None = None) -> tuple[str, Path] | None:
+    ordered = await _candidate_voices(voice_id, device_id)
+    # In a thread: it may run ffmpeg on a recording that was never prepared.
+    return await asyncio.to_thread(_pick_prompt, ordered)
+
+
+def _pick_prompt(ordered: list[dict]) -> tuple[str, Path] | None:
     for item in ordered:
         # Prepared at save time by voice_prep: no ffmpeg work at play time.
         prepared = _readable(item.get("prompt_path"))
@@ -185,8 +213,9 @@ async def synthesize(
     text: str,
     language: str,
     voice_id: str | None = None,
+    device_id: str | None = None,
 ) -> tuple[str, Path, float, bool]:
-    prompt = await asyncio.to_thread(resolve_prompt, voice_id)
+    prompt = await resolve_prompt(voice_id, device_id)
     prompt_id = prompt[0] if prompt else (voice_id or "")
     tts_id = cache_id(text, language, prompt_id)
     want_clone = colab_configured() and bool(prompt)

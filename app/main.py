@@ -3,12 +3,16 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.database.db import close_db
 from app.api.tts import router as tts_router
 from app.api.voices import router as voices_router
+from app.routers.stories import router as story_router
 from app.services.chatterbox_client import colab_configured
 from app.services.gpu_status import gpu_status, watch_gpu
 from app.services.voice_prep import resume_pending
 from app.store import ensure_dirs
+
+from app.api.auth import router as auth_router
 
 ensure_dirs()
 
@@ -22,6 +26,10 @@ app.add_middleware(
 app.include_router(voices_router, prefix="/v1")
 app.include_router(tts_router, prefix="/v1")
 
+ # story router is added here?
+app.include_router(story_router, prefix="/api")
+app.include_router(auth_router)
+
 
 @app.on_event("startup")
 async def resume_voice_prep():
@@ -31,6 +39,13 @@ async def resume_voice_prep():
     if colab_configured():
         _background_tasks.append(asyncio.create_task(watch_gpu()))
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_db()
+    print("🔴 Shutting down... database  Connection closed ...")
+    for task in _background_tasks:
+        task.cancel()
+    await asyncio.gather(*_background_tasks, return_exceptions=True)
 
 # Strong references, so background loops are not garbage-collected.
 _background_tasks: list[asyncio.Task[None]] = []
