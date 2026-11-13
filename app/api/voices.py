@@ -1,18 +1,19 @@
+import asyncio
 import base64
 import json
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.db import get_db
 from app.models.voice import Voice
 from app.schemas.voice import VoiceJson, VoicePatch, VoiceResponse
-from app.services import voice_store
-from app.services.audio import delete_file, save_bytes, save_recording
+from app.services import storage, voice_files, voice_store
+from app.services.audio import delete_file, media_type_for, save_bytes, save_recording
 from app.services.voice_prep import prepare_voice
 
 router = APIRouter(prefix="/voices", tags=["voices"])
@@ -152,13 +153,21 @@ async def get_voice_audio(voice_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(500, "Could not load the voice") from error
     if not voice:
         raise HTTPException(404, "Voice not found")
+    # The original recording: what the phone sent, smaller than the prompt WAV.
     file = voice_store.abs_path(voice.file_path)
     if not file:
         raise HTTPException(404, "Recording not found")
     if not file.exists():
+        # Lost from the disk: play the bucket copy.
+        if storage.storage_configured():
+            key = voice_files.bucket_key(voice.id, file)
+            try:
+                if await asyncio.to_thread(storage.exists, key):
+                    return RedirectResponse(await asyncio.to_thread(storage.signed_url, key), status_code=302)
+            except Exception as error:
+                print(f"[voice] {voice.id}: bucket link failed: {error}", flush=True)
         raise HTTPException(404, "Recording file missing")
-    media = "audio/mp4" if file.suffix.lower() in {".m4a", ".mp4"} else "audio/mpeg"
-    return FileResponse(file, media_type=media, filename=file.name)
+    return FileResponse(file, media_type=media_type_for(file), filename=file.name)
 
 
 @router.patch("/{voice_id}", response_model=VoiceResponse)
@@ -199,15 +208,14 @@ async def delete_voice(
         voice = await voice_store.get_device_voice(db, device_id, voice_id)
         if not voice:
             raise HTTPException(404, "Voice not found")
-        file_path = voice_store.abs_path(voice.file_path)
         await voice_store.delete_voice(db, voice)
         await db.commit()
     except SQLAlchemyError as error:
         raise HTTPException(500, "Could not delete the voice") from error
-    # Files go only after the row is gone, so a failed delete keeps a working voice.
-    if file_path:
-        delete_file(str(file_path))
-        delete_file(str(file_path.with_name(f"{file_path.stem}.prompt.wav")))
-        if file_path.suffix.lower() != ".wav":
-            delete_file(str(file_path.with_suffix(".wav")))  # ffmpeg conversion made by ensure_wav
+    # Files go only after the row is gone, so a failed delete keeps a working voice: the
+    # recording, prompt, conds cache and the bucket copies.
+    try:
+        await asyncio.to_thread(voice_files.remove, voice_id)
+    except Exception as error:
+        print(f"[voice] {voice_id}: file cleanup failed: {error}", flush=True)
     return {"ok": True}

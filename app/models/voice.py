@@ -41,7 +41,8 @@ class Voice(Base):
         String(20), nullable=True
     )
 
-    # Relative to data/ (e.g. "recordings/v_x.wav"); the audio itself stays on disk.
+    # The original recording, relative to data/ (e.g. "recordings/v_x.m4a"). Copied to the bucket
+    # with the prompt (app/services/voice_files.py).
     file_path: Mapped[str] = mapped_column(
         Text, nullable=False
     )

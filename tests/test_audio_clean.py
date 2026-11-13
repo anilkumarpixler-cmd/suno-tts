@@ -53,10 +53,19 @@ def _chunk() -> bytes:
 def test_clean_removes_noisy_lead_in_and_tail() -> None:
     cleaned = _samples(clean_chunk_wav(_chunk()))
     seconds = len(cleaned) / RATE
-    # 1 s of speech plus at most the 20 ms pre-roll and 80 ms post-roll.
-    assert 1.0 <= seconds <= 1.12
-    # Only the 20 ms faded pre-roll is left before the tone, quieter than the old -42 dB lead-in.
-    assert _rms_db(cleaned[: RATE * 20 // 1000]) < -45
+    # 1 s of speech plus the 50 ms pre-roll, 200 ms post-roll and one 20 ms frame of rounding.
+    assert 1.0 <= seconds <= 1.28
+    # The 10 ms fade-in at the front of the pre-roll is quieter than the old -42 dB lead-in.
+    assert _rms_db(cleaned[: RATE * 10 // 1000]) < -45
+
+
+def test_clean_keeps_quiet_last_consonant() -> None:
+    # A final "s"/"t" is quieter than the vowels: 20 dB under speech, above the -42 dB tail noise.
+    chunk = _wav(_noise(0.2, -42) + _tone(1.0, -18) + _tone(0.3, -38) + _noise(0.4, -42))
+    seconds = len(_samples(clean_chunk_wav(chunk))) / RATE
+    # Speech + the whole consonant (ends at 1.5 s) + pre/post-roll (+ frame rounding). Cut after the
+    # last vowel instead (the old end rule), it would be about 1.15 s.
+    assert 1.42 <= seconds <= 1.5
 
 
 def test_clean_fades_to_zero_at_both_ends() -> None:

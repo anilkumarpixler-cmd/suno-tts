@@ -12,10 +12,6 @@ class Story(Base):
         Integer, primary_key=True, index=True
     )
 
-    child_name: Mapped[str] = mapped_column(
-        String(100), nullable=True
-    )
-
     age: Mapped[int | None] = mapped_column(
         Integer, nullable=True
     )
@@ -38,18 +34,6 @@ class Story(Base):
 
     narrator_id: Mapped[str | None] = mapped_column(
         String(100), nullable=True
-    )
-
-    status: Mapped[str] = mapped_column(
-        String(30), nullable=False, default="pending"
-    )
-
-    audio_url: Mapped[str | None] = mapped_column(
-        Text, nullable=True
-    )
-
-    duration_seconds: Mapped[int | None] = mapped_column(
-        Integer, nullable=True
     )
 
     created_at: Mapped[DateTime] = mapped_column(

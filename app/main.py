@@ -9,6 +9,8 @@ from app.api.voices import router as voices_router
 from app.routers.stories import router as story_router
 from app.services.chatterbox_client import colab_configured
 from app.services.gpu_status import gpu_status, watch_gpu
+from app.services.story_audio_store import mark_interrupted
+from app.services.story_cleanup import watch_story_files
 from app.services.voice_prep import resume_pending
 from app.store import ensure_dirs
 
@@ -33,11 +35,15 @@ app.include_router(auth_router)
 
 @app.on_event("startup")
 async def resume_voice_prep():
+    # Story streams were interrupted by the restart: their rows must not stay "generating".
+    await mark_interrupted()
     # Voices still "Preparing" were interrupted by a restart; finish them in the background.
     asyncio.create_task(resume_pending())
     # Keeps the GPU state fresh in the background, so /health never waits for Kaggle.
     if colab_configured():
         _background_tasks.append(asyncio.create_task(watch_gpu()))
+    # Removes finished stories from the server disk once they are safely in the bucket.
+    _background_tasks.append(asyncio.create_task(watch_story_files()))
 
 @app.on_event("shutdown")
 async def shutdown_event():

@@ -14,6 +14,7 @@ from alembic import context
 from app.models.story import Story
 from app.models.voice import Voice
 from app.models.user import User
+from app.models.story_audio import StoryAudio
 from app.database.db import  Base
 
 

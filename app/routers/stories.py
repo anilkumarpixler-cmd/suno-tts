@@ -18,14 +18,12 @@ async def create_story(
 ):
     new_story = Story(
         # id=story_data.id,
-        child_name=story_data.child_name,
         age=story_data.age,
         language=story_data.language,
         title=story_data.title,
         content=story_data.content,
         story_type=story_data.story_type,
         narrator_id=story_data.narrator_id,
-        status="pending",
     )
 
     try:

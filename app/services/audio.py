@@ -12,8 +12,6 @@ from mutagen.wave import WAVE
 
 from app.store import RECORDINGS_DIR, TTS_DIR, ensure_dirs
 
-WAV_EXTENSIONS = {".wav"}
-
 # Bump when prompt/chunk processing changes so cached story audio is regenerated.
 AUDIO_PIPELINE_VERSION = "4"
 
@@ -29,14 +27,19 @@ PROMPT_FILTER = (
 )
 
 # Silence appended to every chunk except the last, so a chunk change sounds like a full stop.
-CHUNK_PAUSE_MS = 150
-_FRAME_MS = 20
-_SPEECH_DROP = 10 ** (22 / 20)  # cut level = 90th-percentile frame RMS - 17 dB (tuned on real chunks)
-_ONSET_FRAMES = 6  # speech must hold for most of 60 ms, so a single noise blip is skipped
-_PRE_ROLL_MS = 2
-_POST_ROLL_MS = 150
-_FADE_IN_MS = 20  # spans the pre-roll, so what is left of the lead-in ramps up from silence
-_FADE_OUT_MS =20
+CHUNK_PAUSE_MS = 10
+_FRAME_MS = 10
+_SPEECH_DROP = 10 ** (17 / 20)  # start cut level = 90th-percentile frame RMS - 17 dB (tuned on real chunks)
+_ONSET_FRAMES = 6  # speech must hold for most of 120 ms, so a single noise blip is skipped
+# The end is looser: last consonants (s, t, th, f) are quiet and short and were being cut.
+# End cut level = 90th-percentile frame RMS - 22 dB. Not lower: Chatterbox's tail noise sits about
+# 24 dB under speech, and a lower cut keeps the whole noisy tail.
+_END_DROP = 10 ** (22 / 20)
+_END_FRAMES = 3  # 2 of 3 frames (40 of 60 ms) above the end cut still count as speech
+_PRE_ROLL_MS = 40
+_POST_ROLL_MS = 100
+_FADE_IN_MS = 40  # spans the pre-roll, so what is left of the lead-in ramps up from silence
+_FADE_OUT_MS = 40
 _MIN_CLEAN_S = 0.3
 
 
@@ -47,11 +50,11 @@ def _extension(filename: str | None) -> str:
 
 
 def save_bytes(voice_id: str, data: bytes, filename: str | None) -> Path:
+    # Kept as the phone sent it: the original. prepare_prompt_wav makes the WAV the GPU needs.
     ensure_dirs()
     dest = RECORDINGS_DIR / f"{voice_id}.{_extension(filename)}"
     dest.write_bytes(data)
-    wav = ensure_wav(dest)
-    return wav if wav.suffix.lower() == ".wav" else dest
+    return dest
 
 
 async def save_recording(voice_id: str, upload: UploadFile) -> Path:
@@ -89,17 +92,18 @@ def find_cloned_tts_path(tts_id: str) -> Path | None:
     return None
 
 
-def _speech_bounds(levels: list[int], cut: float) -> tuple[int, int] | None:
-    """First and last frame where speech holds above `cut` for most of _ONSET_FRAMES."""
-    need = _ONSET_FRAMES - 1
+def _speech_bounds(levels: list[int], start_cut: float, end_cut: float) -> tuple[int, int] | None:
+    """First frame where speech holds above `start_cut` for most of _ONSET_FRAMES, and last frame
+    where it holds above the lower `end_cut` for most of _END_FRAMES."""
     count = len(levels)
     start = next(
-        (i for i in range(count - _ONSET_FRAMES + 1) if sum(v > cut for v in levels[i:i + _ONSET_FRAMES]) >= need),
+        (i for i in range(count - _ONSET_FRAMES + 1)
+         if sum(v > start_cut for v in levels[i:i + _ONSET_FRAMES]) >= _ONSET_FRAMES - 1),
         None,
     )
     end = next(
-        (i for i in range(count - 1, _ONSET_FRAMES - 2, -1)
-         if sum(v > cut for v in levels[i - _ONSET_FRAMES + 1:i + 1]) >= need),
+        (i for i in range(count - 1, _END_FRAMES - 2, -1)
+         if sum(v > end_cut for v in levels[i - _END_FRAMES + 1:i + 1]) >= _END_FRAMES - 1),
         None,
     )
     if start is None or end is None or end < start:
@@ -124,7 +128,7 @@ def clean_chunk_wav(data: bytes, pad_end_ms: int = 0) -> bytes:
     frame = rate * _FRAME_MS // 1000
     levels = [audioop.rms(raw[offset:offset + frame * 2], 2) for offset in range(0, len(raw), frame * 2)]
     speech_level = sorted(levels)[int(len(levels) * 0.9)]
-    bounds = _speech_bounds(levels, speech_level / _SPEECH_DROP)
+    bounds = _speech_bounds(levels, speech_level / _SPEECH_DROP, speech_level / _END_DROP)
     if bounds is None:
         return data
 
@@ -189,6 +193,8 @@ def media_type_for(path: Path) -> str:
         return "audio/wav"
     if suffix in {".m4a", ".mp4"}:
         return "audio/mp4"
+    if suffix == ".flac":
+        return "audio/flac"
     return "audio/mpeg"
 
 
@@ -209,36 +215,48 @@ def _ffmpeg_bin() -> str | None:
     return None
 
 
-def ensure_wav(path: Path) -> Path:
-    if not path.exists():
-        return path
-    if path.suffix.lower() in WAV_EXTENSIONS:
-        return path
+# Finished stories are stored as AAC: speech at 24 kHz mono sounds the same at 64 kbps and the
+# file is ~6x smaller than the WAV. Encoded once, from the merged WAV, so quality never drops.
+STORY_AAC_ARGS = ["-c:a", "aac", "-b:a", "64k", "-ac", "1", "-movflags", "+faststart"]
+# Lossless fallback when AAC encoding fails: about half the WAV size.
+STORY_FLAC_ARGS = ["-c:a", "flac", "-compression_level", "8"]
 
-    wav = path.with_suffix(".wav")
-    if wav.exists() and wav.stat().st_size > 0:
-        return wav
 
+def _ffmpeg_encode(source: Path, dest: Path, codec_args: list[str]) -> Path | None:
     ffmpeg = _ffmpeg_bin()
     if not ffmpeg:
-        return path
-
+        return None
+    # Same extension as dest, so ffmpeg picks the right container.
+    tmp = dest.with_name(f"{dest.stem}.tmp{dest.suffix}")
     try:
         subprocess.run(
-            [ffmpeg, "-y", "-i", str(path), "-ac", "1", "-ar", "24000", str(wav)],
+            [ffmpeg, "-y", "-loglevel", "error", "-i", str(source), *codec_args, str(tmp)],
             check=True,
             capture_output=True,
         )
-        if wav.exists() and wav.stat().st_size > 0:
-            return wav
-    except Exception:
-        wav.unlink(missing_ok=True)
-    return path
+        if tmp.exists() and tmp.stat().st_size > 0:
+            tmp.replace(dest)
+            return dest
+    except Exception as error:
+        print(f"[audio] {dest.suffix} encode failed: {error}", flush=True)
+    tmp.unlink(missing_ok=True)
+    return None
+
+
+def compress_story_wav(wav: Path) -> Path:
+    """The file to store for a finished story: final.m4a, else final.flac, else the WAV itself
+    (ffmpeg missing or both encodes failed)."""
+    return (
+        _ffmpeg_encode(wav, wav.with_suffix(".m4a"), STORY_AAC_ARGS)
+        or _ffmpeg_encode(wav, wav.with_suffix(".flac"), STORY_FLAC_ARGS)
+        or wav
+    )
 
 
 def prepare_prompt_wav(source: Path) -> Path:
-    """Cleaned copy of a voice recording for cloning (`<name>.prompt.wav`), rebuilt when the
-    recording changes. Falls back to the original file if ffmpeg is missing or fails."""
+    """Cleaned 24 kHz mono WAV of a voice recording (any format ffmpeg reads) for cloning
+    (`<name>.prompt.wav`), rebuilt when the recording changes. Falls back to the original file if
+    ffmpeg is missing or fails."""
     dest = source.with_name(f"{source.stem}.prompt.wav")
     if dest.exists() and dest.stat().st_size > 0 and dest.stat().st_mtime >= source.stat().st_mtime:
         return dest

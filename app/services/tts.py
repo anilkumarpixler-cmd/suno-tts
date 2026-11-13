@@ -14,7 +14,6 @@ from app.services.audio import (
     clean_chunk_wav,
     concat_wav_bytes,
     delete_file,
-    ensure_wav,
     find_cloned_tts_path,
     find_tts_path,
     prepare_prompt_wav,
@@ -24,6 +23,7 @@ from sqlalchemy import select
 
 from app.database.db import sessionLocal
 from app.models.voice import Voice
+from app.services import voice_files
 from app.services.chatterbox_client import colab_configured, generate_on_colab
 from app.services.voice_store import abs_path
 
@@ -158,19 +158,21 @@ async def resolve_prompt(voice_id: str | None, device_id: str | None = None) -> 
 
 def _pick_prompt(ordered: list[dict]) -> tuple[str, Path] | None:
     for item in ordered:
-        # Prepared at save time by voice_prep: no ffmpeg work at play time.
-        prepared = _readable(item.get("prompt_path"))
+        voice_id = str(item.get("id") or "")
+        # Prepared at save time by voice_prep: no ffmpeg work at play time. The prompt comes back
+        # from the bucket first, so a lost disk keeps the same prompt (and the GPU's voice_key).
+        prepared = _readable(item.get("prompt_path")) or _restored(voice_id, item.get("prompt_path"))
         if prepared is not None:
-            return str(item.get("id") or ""), prepared
-        source = _readable(item.get("file_path"))
+            return voice_id, prepared
+        source = _readable(item.get("file_path")) or _restored(voice_id, item.get("file_path"))
         if source is None:
             continue
-        prompt = ensure_wav(source)
-        if prompt.exists() and prompt.stat().st_size > 0:
-            if prompt.suffix.lower() == ".wav":
-                prompt = prepare_prompt_wav(prompt)
-            return str(item.get("id") or ""), prompt
+        return voice_id, prepare_prompt_wav(source)
     return None
+
+
+def _restored(voice_id: str, path_value: str | None) -> Path | None:
+    return voice_files.restore(voice_id, Path(path_value)) if voice_id and path_value else None
 
 
 async def _edge_tts(text: str, language: str, dest: Path) -> Path:

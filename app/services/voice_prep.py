@@ -9,7 +9,8 @@ from sqlalchemy import select
 
 from app.database.db import sessionLocal
 from app.models.voice import Voice
-from app.services.audio import ensure_wav, prepare_prompt_wav
+from app.services import voice_files
+from app.services.audio import prepare_prompt_wav
 from app.services.chatterbox_client import colab_configured, upload_voice_to_gpu
 from app.services.voice_store import abs_path, rel_path
 
@@ -27,11 +28,12 @@ async def _update(voice_id: str, **fields) -> bool:
         return True
 
 
-def _clean_prompt(source: Path) -> Path:
-    prompt = ensure_wav(source)
-    if prompt.suffix.lower() == ".wav":
-        prompt = prepare_prompt_wav(prompt)
-    return prompt
+def _back_up(voice_id: str, source: Path, prompt: Path) -> None:
+    # A bucket problem never fails the voice: it works from the disk copy.
+    try:
+        voice_files.back_up(voice_id, [source, prompt])
+    except Exception as error:
+        print(f"[voice] {voice_id}: bucket backup failed, kept local: {error}", flush=True)
 
 
 async def prepare_voice(voice_id: str) -> None:
@@ -41,10 +43,11 @@ async def prepare_voice(voice_id: str) -> None:
     if source is None:
         return
     try:
-        prompt = await asyncio.to_thread(_clean_prompt, source)
+        prompt = await asyncio.to_thread(prepare_prompt_wav, source)
         if not await _update(voice_id, prompt_path=rel_path(prompt)):
             return
         print(f"[voice] prompt ready {voice_id}", flush=True)
+        await asyncio.to_thread(_back_up, voice_id, source, prompt)
         if colab_configured():
             voice_key = await upload_voice_to_gpu(str(prompt))
             await _update(voice_id, voice_key=voice_key, gpu_prepared=True)

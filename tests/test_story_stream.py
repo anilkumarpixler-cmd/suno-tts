@@ -99,6 +99,11 @@ def _fresh_scheduler(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(story_stream, "_workers", {})
     monkeypatch.setattr(story_stream, "_plays", {})
     monkeypatch.setattr(story_stream, "_cancelled_plays", story_stream.OrderedDict())
+    # No bucket or database: "already made" is only the local final.wav here.
+    monkeypatch.setattr(story_stream.storage, "storage_configured", lambda: False)
+    monkeypatch.setattr(story_stream, "_play_devices", {})
+    monkeypatch.setattr(story_stream, "_device_stories", {})
+    monkeypatch.setattr(story_stream, "_device_prefetches", {})
 
     async def fake_chunk(chunk_text, language, prompt_wav_path, is_last) -> bytes:
         if chunk_text.startswith("First"):
@@ -165,8 +170,8 @@ def test_starting_a_story_drops_stale_prefetches(tmp_path, monkeypatch) -> None:
         for index in range(2):
             story_stream._submit_chunk("other", index, busy, "English", "prompt.wav", story_stream.PRIO_FIRST)
         await asyncio.sleep(0.01)
-        stale = story_stream.prefetch_story_start("stale story", "English", "v1", "default", "prompt.wav")
-        kept = story_stream.prefetch_story_start("next story", "English", "v1", "default", "prompt.wav")
+        stale = await story_stream.prefetch_story_start("stale story", "English", "v1", "default", "prompt.wav")
+        kept = await story_stream.prefetch_story_start("next story", "English", "v1", "default", "prompt.wav")
         stale_futures = [story_stream._jobs[(stale, index)].future for index in range(story_stream.PREFETCH_CHUNKS)]
         start = asyncio.create_task(
             story_stream.start_story_stream("next story", "English", "v1", "default", "prompt.wav", play_id="p1")
@@ -179,6 +184,116 @@ def test_starting_a_story_drops_stale_prefetches(tmp_path, monkeypatch) -> None:
         assert (kept, 1) in story_stream._jobs
         start.cancel()
         await asyncio.gather(start, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def _keep_gpus_busy() -> None:
+    busy = ["Busy one.", "Busy two."]
+    for index in range(2):
+        story_stream._submit_chunk("other", index, busy, "English", "prompt.wav", story_stream.PRIO_FIRST)
+
+
+def test_starting_a_story_keeps_other_devices_prefetches(tmp_path, monkeypatch) -> None:
+    # Phone X starting a story must not drop the next story phone Y prefetched.
+    _fresh_scheduler(tmp_path, monkeypatch)
+
+    async def scenario() -> None:
+        _keep_gpus_busy()
+        await asyncio.sleep(0.01)
+        mine = await story_stream.prefetch_story_start("x next", "English", "v1", "default", "prompt.wav", device_id="X")
+        theirs = await story_stream.prefetch_story_start("y next", "English", "v1", "default", "prompt.wav", device_id="Y")
+        start = asyncio.create_task(
+            story_stream.start_story_stream("x story", "English", "v1", "default", "prompt.wav", device_id="X")
+        )
+        await asyncio.sleep(0.05)
+        assert not any(key[0] == mine for key in story_stream._jobs)
+        assert (theirs, 0) in story_stream._jobs
+        assert (theirs, 1) in story_stream._jobs
+        start.cancel()
+        await asyncio.gather(start, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_shared_prefetch_kept_while_another_device_needs_it(tmp_path, monkeypatch) -> None:
+    _fresh_scheduler(tmp_path, monkeypatch)
+
+    async def scenario() -> None:
+        _keep_gpus_busy()
+        await asyncio.sleep(0.01)
+        shared = await story_stream.prefetch_story_start("shared", "English", "v1", "default", "prompt.wav", device_id="X")
+        await story_stream.prefetch_story_start("shared", "English", "v1", "default", "prompt.wav", device_id="Y")
+        start = asyncio.create_task(
+            story_stream.start_story_stream("x story", "English", "v1", "default", "prompt.wav", device_id="X")
+        )
+        await asyncio.sleep(0.05)
+        assert story_stream._jobs[(shared, 0)].prefetched_for == {"Y"}
+        start.cancel()
+        await asyncio.gather(start, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_device_prefetches_are_capped(tmp_path, monkeypatch) -> None:
+    # One phone prefetching many stories keeps only the newest few in the queue.
+    _fresh_scheduler(tmp_path, monkeypatch)
+
+    async def scenario() -> None:
+        _keep_gpus_busy()
+        await asyncio.sleep(0.01)
+        keys = [
+            await story_stream.prefetch_story_start(f"story {n}", "English", "v1", "default", "prompt.wav", device_id="X")
+            for n in range(story_stream.PREFETCH_STORIES_PER_DEVICE + 2)
+        ]
+        queued = {key for key, _ in story_stream._jobs if key != "other"}
+        assert queued == set(keys[-story_stream.PREFETCH_STORIES_PER_DEVICE:])
+
+    asyncio.run(scenario())
+
+
+def test_device_starting_another_story_stops_the_previous_one(tmp_path, monkeypatch) -> None:
+    # The app's cancel never arrived: the server still lets one phone generate one story only.
+    _fresh_scheduler(tmp_path, monkeypatch)
+    monkeypatch.setattr(story_stream, "chunk_story", lambda text: ["First chunk.", "Second chunk.", "Third chunk."])
+
+    async def scenario() -> None:
+        first = await story_stream.start_story_stream(
+            "story a", "English", "v1", "default", "prompt.wav", play_id="a1", device_id="X"
+        )
+        old = story_stream._workers[first["key"]]
+        second = await story_stream.start_story_stream(
+            "story b", "English", "v1", "default", "prompt.wav", play_id="b1", device_id="X"
+        )
+        await asyncio.gather(old, return_exceptions=True)
+        assert old.cancelled()
+        assert story_stream._plays == {"b1": second["key"]}
+        assert story_stream._device_stories == {"X": second["key"]}
+        story_stream._workers[second["key"]].cancel()
+        await asyncio.gather(story_stream._workers[second["key"]], return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_story_another_device_listens_to_keeps_generating(tmp_path, monkeypatch) -> None:
+    _fresh_scheduler(tmp_path, monkeypatch)
+
+    async def scenario() -> None:
+        shared = await story_stream.start_story_stream(
+            "story a", "English", "v1", "default", "prompt.wav", play_id="x1", device_id="X"
+        )
+        await story_stream.start_story_stream("story a", "English", "v1", "default", "prompt.wav", play_id="y1", device_id="Y")
+        worker = story_stream._workers[shared["key"]]
+        other = await story_stream.start_story_stream(
+            "story b", "English", "v1", "default", "prompt.wav", play_id="x2", device_id="X"
+        )
+        await asyncio.sleep(0.05)
+        assert not worker.done()
+        assert story_stream._plays == {"y1": shared["key"], "x2": other["key"]}
+        workers = [story_stream._workers[key] for key in (shared["key"], other["key"])]
+        for running in workers:
+            running.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
 
     asyncio.run(scenario())
 
@@ -231,7 +346,7 @@ def test_prefetch_takes_only_one_gpu(tmp_path, monkeypatch) -> None:
         playing = ["Slow one.", "Slow two.", "Slow three."]
         for index in range(1, 3):
             story_stream._submit_chunk("playing", index, playing, "English", "prompt.wav", story_stream.PRIO_ACTIVE)
-        nxt = story_stream.prefetch_story_start("next story", "English", "v1", "default", "prompt.wav")
+        nxt = await story_stream.prefetch_story_start("next story", "English", "v1", "default", "prompt.wav")
         await asyncio.sleep(0.05)
         assert _running(nxt) == [0]
         assert _running("playing") == [1]
