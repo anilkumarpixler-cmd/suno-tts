@@ -123,20 +123,22 @@ def _readable(path_value: str | None) -> Path | None:
     return None
 
 
-async def _candidate_voices(voice_id: str | None, device_id: str | None) -> list[dict]:
-    # The asked voice first, then the same device's default, then its other voices.
+async def _candidate_voices(voice_id: str | None, user_id: int | None) -> list[dict]:
+    # Only the user's own voices: the asked one first, then their default, then their others.
+    # Another user's voice id is ignored (the story plays in this user's default instead).
+    if user_id is None:
+        return []
     try:
         async with sessionLocal() as db:
             match = await db.get(Voice, voice_id) if voice_id else None
-            owner = match.device_id if match else device_id
-            others: list[Voice] = []
-            if owner:
-                result = await db.execute(
-                    select(Voice)
-                    .where(Voice.device_id == owner)
-                    .order_by(Voice.is_default.desc(), Voice.created_at)
-                )
-                others = [item for item in result.scalars().all() if item is not match]
+            if match is not None and match.user_id != user_id:
+                match = None
+            result = await db.execute(
+                select(Voice)
+                .where(Voice.user_id == user_id)
+                .order_by(Voice.is_default.desc(), Voice.created_at)
+            )
+            others = [item for item in result.scalars().all() if item is not match]
     except Exception as error:
         print(f"[tts] voice lookup failed: {error}", flush=True)
         return []
@@ -150,8 +152,8 @@ async def _candidate_voices(voice_id: str | None, device_id: str | None) -> list
     ]
 
 
-async def resolve_prompt(voice_id: str | None, device_id: str | None = None) -> tuple[str, Path] | None:
-    ordered = await _candidate_voices(voice_id, device_id)
+async def resolve_prompt(voice_id: str | None, user_id: int | None = None) -> tuple[str, Path] | None:
+    ordered = await _candidate_voices(voice_id, user_id)
     # In a thread: it may run ffmpeg on a recording that was never prepared.
     return await asyncio.to_thread(_pick_prompt, ordered)
 
@@ -215,9 +217,9 @@ async def synthesize(
     text: str,
     language: str,
     voice_id: str | None = None,
-    device_id: str | None = None,
+    user_id: int | None = None,
 ) -> tuple[str, Path, float, bool]:
-    prompt = await resolve_prompt(voice_id, device_id)
+    prompt = await resolve_prompt(voice_id, user_id)
     prompt_id = prompt[0] if prompt else (voice_id or "")
     tts_id = cache_id(text, language, prompt_id)
     want_clone = colab_configured() and bool(prompt)

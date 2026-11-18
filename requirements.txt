@@ -117,6 +117,7 @@ scikit-learn==1.9.1
 scipy==1.17.1
 semantic-version==2.10.0
 setuptools==84.0.0
+slowapi==0.1.10
 shellingham==1.5.4
 six==1.17.0
 soundfile==0.14.0

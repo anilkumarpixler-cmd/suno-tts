@@ -4,12 +4,14 @@ import json
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth_dependencies import get_current_user
 from app.database.db import get_db
+from app.models.user import User
 from app.models.voice import Voice
 from app.schemas.voice import VoiceJson, VoicePatch, VoiceResponse
 from app.services import storage, voice_files, voice_store
@@ -17,14 +19,6 @@ from app.services.audio import delete_file, media_type_for, save_bytes, save_rec
 from app.services.voice_prep import prepare_voice
 
 router = APIRouter(prefix="/voices", tags=["voices"])
-
-
-def device_header(x_device_id: str | None = Header(default=None)) -> str:
-    # No login yet: each phone sends the random id it saved on first launch.
-    value = (x_device_id or "").strip()
-    if not value or len(value) > 64:
-        raise HTTPException(400, "X-Device-Id header is required")
-    return value
 
 
 def _parse_languages(raw: str | list[str]) -> list[str]:
@@ -64,13 +58,13 @@ async def _persist(
     request: Request,
     background: BackgroundTasks,
     db: AsyncSession,
-    device_id: str,
+    user: User,
     name: str,
     languages: list[str],
     path: Path,
 ) -> VoiceResponse:
     try:
-        voice = await voice_store.create_voice(db, device_id, path.stem, name, languages, path)
+        voice = await voice_store.create_voice(db, user.id, path.stem, name, languages, path)
         await db.commit()
     except SQLAlchemyError as error:
         delete_file(str(path))
@@ -81,11 +75,11 @@ async def _persist(
     return _out(request, voice)
 
 
-async def _check_name(db: AsyncSession, device_id: str, name: str) -> str:
+async def _check_name(db: AsyncSession, user: User, name: str) -> str:
     name = name.strip()
     if not name:
         raise HTTPException(400, "Name is required")
-    if await voice_store.name_taken(db, device_id, name):
+    if await voice_store.name_taken(db, user.id, name):
         raise HTTPException(400, f'You already have a voice named "{name}"')
     return name
 
@@ -93,15 +87,14 @@ async def _check_name(db: AsyncSession, device_id: str, name: str) -> str:
 @router.get("", response_model=list[VoiceResponse])
 async def list_voices(
     request: Request,
-    device_id: str = Depends(device_header),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # Only the logged-in user's voices.
     try:
-        voices = await voice_store.list_voices(db, device_id)
+        voices = await voice_store.list_voices(db, user.id)
     except SQLAlchemyError as error:
         raise HTTPException(500, "Could not load voices") from error
-    # The app lists voices on every launch, so this shows each phone's id (needed for the voices.json import).
-    print(f"[voices] device {device_id}: {len(voices)} voice(s)", flush=True)
     return [_out(request, voice) for voice in voices]
 
 
@@ -112,13 +105,13 @@ async def create_voice(
     name: str = Form(...),
     languages: str = Form("English"),
     audio: UploadFile = File(...),
-    device_id: str = Depends(device_header),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    name = await _check_name(db, device_id, name)
+    name = await _check_name(db, user, name)
     voice_id = f"v_{uuid.uuid4().hex[:10]}"
     path = await save_recording(voice_id, audio)
-    return await _persist(request, background, db, device_id, name, _parse_languages(languages), path)
+    return await _persist(request, background, db, user, name, _parse_languages(languages), path)
 
 
 @router.post("/json", response_model=VoiceResponse)
@@ -126,10 +119,10 @@ async def create_voice_json(
     body: VoiceJson,
     request: Request,
     background: BackgroundTasks,
-    device_id: str = Depends(device_header),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    name = await _check_name(db, device_id, body.name)
+    name = await _check_name(db, user, body.name)
     payload = body.audio_base64.strip()
     if payload.startswith("data:"):
         payload = payload.split(",", 1)[-1]
@@ -141,10 +134,10 @@ async def create_voice_json(
         raise HTTPException(400, "Audio file is required")
     voice_id = f"v_{uuid.uuid4().hex[:10]}"
     path = save_bytes(voice_id, data, body.filename)
-    return await _persist(request, background, db, device_id, name, _parse_languages(body.languages), path)
+    return await _persist(request, background, db, user, name, _parse_languages(body.languages), path)
 
 
-# No device header: the app's audio player loads this URL directly. The voice id is random.
+# No login header: the app's audio player loads this URL directly. The voice id is random.
 @router.get("/{voice_id}/audio")
 async def get_voice_audio(voice_id: str, db: AsyncSession = Depends(get_db)):
     try:
@@ -175,22 +168,22 @@ async def update_voice(
     voice_id: str,
     body: VoicePatch,
     request: Request,
-    device_id: str = Depends(device_header),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        voice = await voice_store.get_device_voice(db, device_id, voice_id)
+        voice = await voice_store.get_user_voice(db, user.id, voice_id)
         if not voice:
             raise HTTPException(404, "Voice not found")
         if body.name is not None and body.name.strip():
             name = body.name.strip()
-            if await voice_store.name_taken(db, device_id, name, exclude_id=voice_id):
+            if await voice_store.name_taken(db, user.id, name, exclude_id=voice_id):
                 raise HTTPException(400, f'You already have a voice named "{name}"')
             voice.name = name
         if body.avatar is not None:
             voice.avatar = body.avatar
         if body.is_default is True:
-            await voice_store.set_default(db, device_id, voice_id)
+            await voice_store.set_default(db, user.id, voice_id)
         await db.commit()
         await db.refresh(voice)
     except SQLAlchemyError as error:
@@ -201,11 +194,11 @@ async def update_voice(
 @router.delete("/{voice_id}")
 async def delete_voice(
     voice_id: str,
-    device_id: str = Depends(device_header),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        voice = await voice_store.get_device_voice(db, device_id, voice_id)
+        voice = await voice_store.get_user_voice(db, user.id, voice_id)
         if not voice:
             raise HTTPException(404, "Voice not found")
         await voice_store.delete_voice(db, voice)

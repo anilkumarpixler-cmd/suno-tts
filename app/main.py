@@ -11,14 +11,21 @@ from app.services.chatterbox_client import colab_configured
 from app.services.gpu_status import gpu_status, watch_gpu
 from app.services.story_audio_store import mark_interrupted
 from app.services.story_cleanup import watch_story_files
+from app.services.token_cleanup import watch_refresh_tokens
 from app.services.voice_prep import resume_pending
 from app.store import ensure_dirs
 
+from slowapi.errors import RateLimitExceeded
+
 from app.api.auth import router as auth_router
+from app.core.rate_limit import limiter, rate_limit_exceeded
 
 ensure_dirs()
 
 app = FastAPI(title="Suno TTS", version="1.0.0", redirect_slashes=False)
+# Limits login / signup attempts (see app/api/auth.py).
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -44,6 +51,8 @@ async def resume_voice_prep():
         _background_tasks.append(asyncio.create_task(watch_gpu()))
     # Removes finished stories from the server disk once they are safely in the bucket.
     _background_tasks.append(asyncio.create_task(watch_story_files()))
+    # Deletes expired refresh tokens for all users, once a day.
+    _background_tasks.append(asyncio.create_task(watch_refresh_tokens()))
 
 @app.on_event("shutdown")
 async def shutdown_event():

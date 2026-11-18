@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel
 from app.services import hls, storage
@@ -32,6 +32,8 @@ from app.services.story_stream import (
     wait_for_story_file,
 )
 from app.services.tts import TtsUnavailable, resolve_prompt, synthesize
+from app.core.auth_dependencies import get_current_user
+from app.models.user import User
 
 router = APIRouter(prefix="/tts", tags=["tts"])
 
@@ -56,12 +58,14 @@ class ProgressRequest(BaseModel):
 
 
 
-# Optional: when voice_id is missing or deleted, the device's default voice narrates.
+# The phone's id: one story at a time per phone (playback tracking). Voices come from the login.
 DeviceId = Header(default=None, alias="X-Device-Id")
 
 
 @router.post("")
-async def create_tts(body: TtsRequest, request: Request, device_id: str | None = DeviceId):
+async def create_tts(
+    body: TtsRequest, request: Request, device_id: str | None = DeviceId, user: User = Depends(get_current_user)
+):
     text = body.text.strip()
     if not text:
         raise HTTPException(400, "Text is required")
@@ -86,7 +90,7 @@ async def create_tts(body: TtsRequest, request: Request, device_id: str | None =
         pass
     # #endregion
     try:
-        tts_id, path, duration, cloned = await synthesize(text, body.language, body.voice_id, device_id)
+        tts_id, path, duration, cloned = await synthesize(text, body.language, body.voice_id, user.id)
     except TtsUnavailable as error:
         raise HTTPException(503, str(error)) from error
     base = str(request.base_url).rstrip("/")
@@ -100,12 +104,18 @@ async def create_tts(body: TtsRequest, request: Request, device_id: str | None =
 
 
 @router.post("/stream")
-async def create_story_stream(body: StoryStreamRequest, request: Request, device_id: str | None = DeviceId):
+async def create_story_stream(
+    body: StoryStreamRequest,
+    request: Request,
+    device_id: str | None = DeviceId,
+    user: User = Depends(get_current_user),
+):
     text = body.text.strip()
     if not text:
         raise HTTPException(400, "Text is required")
 
-    prompt = await resolve_prompt(body.voice_id, device_id)
+    # Only this user's voices narrate (another user's voice id falls back to their default).
+    prompt = await resolve_prompt(body.voice_id, user.id)
     if prompt is None:
         raise HTTPException(503, "No prompt/voice recording available for streaming TTS")
 
@@ -172,14 +182,17 @@ async def create_story_stream(body: StoryStreamRequest, request: Request, device
 
 
 @router.post("/stream/prefetch")
-async def prefetch_story_stream(body: StoryStreamRequest, device_id: str | None = DeviceId):
+async def prefetch_story_stream(
+    body: StoryStreamRequest, device_id: str | None = DeviceId, user: User = Depends(get_current_user)
+):
     # The app calls this for the next story while the current one plays: only its first chunks are
     # queued, and a free GPU makes them between the current story's chunks.
     text = body.text.strip()
     if not text:
         raise HTTPException(400, "Text is required")
 
-    prompt = await resolve_prompt(body.voice_id, device_id)
+    # Only this user's voices narrate (another user's voice id falls back to their default).
+    prompt = await resolve_prompt(body.voice_id, user.id)
     if prompt is None:
         raise HTTPException(503, "No prompt/voice recording available for streaming TTS")
 

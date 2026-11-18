@@ -1,5 +1,5 @@
 
-from sqlalchemy import String, Text, Boolean, DateTime, UniqueConstraint, func
+from sqlalchemy import ForeignKey, Integer, String, Text, Boolean, DateTime, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -8,17 +8,17 @@ from app.database.db import Base
 
 class Voice(Base):
     __tablename__ = "voices"
-    # One device can have many voices, but not two with the same name.
-    __table_args__ = (UniqueConstraint("device_id", "name"),)
+    # One user can have many voices, but not two with the same name.
+    __table_args__ = (UniqueConstraint("user_id", "name", name="voices_user_id_name_key"),)
 
     # "v_<10 hex>": the same id the recordings, stories.narrator_id and the TTS caches use.
     id: Mapped[str] = mapped_column(
         String(20), primary_key=True
     )
 
-    # No login yet: the app sends a random id it saved on first launch (X-Device-Id header).
-    device_id: Mapped[str] = mapped_column(
-        String(64), nullable=False, index=True
+    # The owner (the logged-in user who recorded it): only this user lists, changes or narrates with it.
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
 
     name: Mapped[str] = mapped_column(

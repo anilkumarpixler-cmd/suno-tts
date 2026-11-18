@@ -1,7 +1,7 @@
 """One-time copy of data/voices.json into the PostgreSQL "voices" table.
 
 Usage (from suno-tts/, venv active):
-    python scripts/import_voices_json.py --device-id <the phone's X-Device-Id>
+    python scripts/import_voices_json.py --user-id <the owner's users.id>
 
 Voices whose id is already in the table are skipped. After a successful run the file is
 renamed to voices.json.bak.
@@ -23,7 +23,7 @@ from app.store import DATA_DIR  # noqa: E402
 VOICES_JSON = DATA_DIR / "voices.json"
 
 
-async def main(device_id: str) -> None:
+async def main(user_id: int) -> None:
     if not VOICES_JSON.exists():
         print(f"Nothing to import: {VOICES_JSON} not found")
         return
@@ -39,7 +39,7 @@ async def main(device_id: str) -> None:
             has_default = has_default or is_default
             db.add(Voice(
                 id=item["id"],
-                device_id=device_id,
+                user_id=user_id,
                 name=item["name"],
                 languages=item.get("languages") or ["English"],
                 # A voice stuck mid-prep is finished by resume_pending on the next start.
@@ -60,5 +60,5 @@ async def main(device_id: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--device-id", required=True)
-    asyncio.run(main(parser.parse_args().device_id.strip()))
+    parser.add_argument("--user-id", type=int, required=True)
+    asyncio.run(main(parser.parse_args().user_id))
